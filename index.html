@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic Leaflet Map from Google Sheets</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f5f5;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .header h1 {
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        .controls {
+            background: white;
+            padding: 15px 20px;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .controls input {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            flex: 1;
+            min-width: 250px;
+        }
+        .controls button {
+            padding: 8px 16px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        .controls button:hover {
+            background: #5568d3;
+        }
+        .status {
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            background: #e8f5e9;
+            color: #2e7d32;
+            flex-shrink: 0;
+        }
+        .status.error {
+            background: #ffebee;
+            color: #c62828;
+        }
+        #map {
+            flex: 1;
+            background: #e0e0e0;
+        }
+        .leaflet-popup-content {
+            font-family: inherit;
+        }
+        .popup-content {
+            max-width: 250px;
+        }
+        .popup-content h3 {
+            margin: 0 0 8px 0;
+            font-size: 16px;
+            color: #333;
+        }
+        .popup-content p {
+            margin: 4px 0;
+            font-size: 13px;
+            color: #666;
+        }
+        .popup-content a {
+            color: #667eea;
+            text-decoration: none;
+            font-size: 13px;
+        }
+        .popup-content a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📍 Dynamic Map from Google Sheets</h1>
+            <p>Real-time map visualization powered by Leaflet & OpenStreetMap</p>
+        </div>
+        <div class="controls">
+            <input type="text" id="sheetsUrl" placeholder="Paste your Google Sheets CSV export URL here..." />
+            <button onclick="loadData()">Load Data</button>
+            <div class="status" id="status">Ready</div>
+        </div>
+        <div id="map"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/papaparse/5.4.1/papaparse.min.js"></script>
+    <script>
+        // Initialize map
+        const map = L.map('map').setView([20, 0], 2);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors',
+            maxZoom: 19
+        }).addTo(map);
+
+        const markers = [];
+
+        function updateStatus(message, isError = false) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = isError ? 'status error' : 'status';
+        }
+
+        function clearMarkers() {
+            markers.forEach(marker => map.removeLayer(marker));
+            markers.length = 0;
+        }
+
+        function loadData() {
+            const url = document.getElementById('sheetsUrl').value.trim();
+            
+            if (!url) {
+                updateStatus('Please enter a URL', true);
+                return;
+            }
+
+            updateStatus('Loading data...');
+
+            // Convert Google Sheets URL to CSV export format
+            let csvUrl = url;
+            if (url.includes('docs.google.com/spreadsheets')) {
+                const sheetId = url.match(/\/d\/([a-zA-Z0-9-_]+)/)?.[1];
+                if (!sheetId) {
+                    updateStatus('Invalid Google Sheets URL', true);
+                    return;
+                }
+                csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
+            }
+
+            // Fetch and parse CSV
+            fetch(csvUrl)
+                .then(response => {
+                    if (!response.ok) throw new Error('Failed to fetch data');
+                    return response.text();
+                })
+                .then(csv => {
+                    Papa.parse(csv, {
+                        header: true,
+                        skipEmptyLines: true,
+                        complete: (results) => {
+                            processData(results.data);
+                        },
+                        error: (error) => {
+                            updateStatus(`Parse error: ${error.message}`, true);
+                        }
+                    });
+                })
+                .catch(error => {
+                    updateStatus(`Error: ${error.message}`, true);
+                });
+        }
+
+        function processData(data) {
+            clearMarkers();
+            let successCount = 0;
+            let errorCount = 0;
+
+            data.forEach((row, index) => {
+                // Normalize header names (trim whitespace)
+                const normalizedRow = {};
+                for (const key in row) {
+                    normalizedRow[key.trim()] = row[key];
+                }
+
+                const lat = parseFloat(normalizedRow.Lat || normalizedRow.lat || normalizedRow.Latitude);
+                const lon = parseFloat(normalizedRow.Lon || normalizedRow.lon || normalizedRow.Longitude);
+                const name = normalizedRow.Name || normalizedRow.name || 'Unnamed';
+                const description = normalizedRow.Description || normalizedRow.description || '';
+                const date = normalizedRow.Date || normalizedRow.date || '';
+                const url = normalizedRow.URL || normalizedRow.url || '';
+
+                if (isNaN(lat) || isNaN(lon)) {
+                    errorCount++;
+                    return;
+                }
+
+                // Create popup content
+                let popupHtml = `<div class="popup-content">
+                    <h3>${escapeHtml(name)}</h3>`;
+                
+                if (description) popupHtml += `<p><strong>Description:</strong> ${escapeHtml(description)}</p>`;
+                if (date) popupHtml += `<p><strong>Date:</strong> ${escapeHtml(date)}</p>`;
+                if (url) popupHtml += `<p><a href="${escapeHtml(url)}" target="_blank">View Link →</a></p>`;
+                
+                popupHtml += `</div>`;
+
+                // Create marker
+                const marker = L.circleMarker([lat, lon], {
+                    radius: 8,
+                    fillColor: '#667eea',
+                    color: '#5568d3',
+                    weight: 2,
+                    opacity: 0.8,
+                    fillOpacity: 0.7
+                })
+                .bindPopup(popupHtml)
+                .addTo(map);
+
+                markers.push(marker);
+                successCount++;
+            });
+
+            if (successCount > 0) {
+                // Fit map to markers
+                if (markers.length > 0) {
+                    const group = new L.featureGroup(markers);
+                    map.fitBounds(group.getBounds().pad(0.1));
+                }
+                updateStatus(`Loaded ${successCount} locations${errorCount > 0 ? ` (${errorCount} skipped)` : ''}`);
+            } else {
+                updateStatus('No valid locations found', true);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Example: Auto-load if URL is in local storage
+        const savedUrl = localStorage.getItem('sheetsUrl');
+        if (savedUrl) {
+            document.getElementById('sheetsUrl').value = savedUrl;
+        }
+    </script>
+</body>
+</html>
